@@ -1,0 +1,627 @@
+#!/usr/bin/env python3
+"""
+ralph-db — Ralph 数据层 (Python, 零外部依赖)
+
+提供 SQLite parameterized query，彻底消灭 SQL 注入。
+所有子命令输出 JSON (stdout)，日志到 stderr。
+
+Usage:
+    ralph-db init <project>
+    ralph-db add-task <project> --id X --title T --priority N ...
+    ralph-db get-task <project> <task_id>
+    ralph-db list-pending <project>
+    ralph-db list-all <project>
+    ralph-db count-pending <project>
+    ralph-db update-status <project> <task_id> <status>
+    ralph-db update-result <project> <task_id> --result R [--checkpoint C]
+    ralph-db update-priority <project> <task_id> <priority>
+    ralph-db update-model <project> <task_id> <model>
+    ralph-db update-session <project> <task_id> <session_id>
+    ralph-db get-session <project> <task_id>
+    ralph-db increment-retry <project> <task_id>
+    ralph-db get-retry-info <project> <task_id>
+    ralph-db delete-task <project> <task_id>
+    ralph-db add-discovery <project> --source-task T --description D [--severity S]
+    ralph-db get-unconsumed-discoveries <project>
+    ralph-db consume-discoveries <project>
+    ralph-db log-cycle <project> --cycle N --phase P --task-id T --model M --summary S --exit-code E --duration D
+    ralph-db get-last-cycle-log <project>
+    ralph-db get-today-cycle-logs <project>
+    ralph-db get-today-completed-tasks <project>
+    ralph-db resolve-project <path>
+    ralph-db query <project> <sql>
+    ralph-db task-stats <project>
+"""
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import sqlite3
+import subprocess
+import sys
+from pathlib import Path
+
+RALPH_HOME = Path(os.environ.get("RALPH_HOME", Path.home() / ".ralph"))
+
+
+def get_db_path(project: str) -> Path:
+    return RALPH_HOME / "projects" / project / "ralph.db"
+
+
+def ensure_project_dir(project: str) -> Path:
+    project_dir = RALPH_HOME / "projects" / project
+    project_dir.mkdir(parents=True, exist_ok=True)
+    return project_dir
+
+
+def get_connection(project: str) -> sqlite3.Connection:
+    db_path = get_db_path(project)
+    if not db_path.exists():
+        print(f"Error: database not found for project '{project}'. Run 'ralph-db init {project}' first.", file=sys.stderr)
+        sys.exit(1)
+    conn = sqlite3.connect(str(db_path), timeout=5.0)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
+    return conn
+
+
+def rows_to_json(rows):
+    return json.dumps([dict(r) for r in rows], ensure_ascii=False)
+
+
+def row_to_json(row):
+    if row is None:
+        return "null"
+    return json.dumps(dict(row), ensure_ascii=False)
+
+
+# ── Schema ──
+
+SCHEMA_SQL = """\
+CREATE TABLE IF NOT EXISTS tasks (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    priority INTEGER DEFAULT 3,
+    status TEXT DEFAULT 'pending',
+    model TEXT DEFAULT 'claude-sonnet-4-6',
+    complexity TEXT DEFAULT 'simple',
+    prompt TEXT NOT NULL,
+    context_files TEXT,
+    source TEXT DEFAULT 'manual',
+    result TEXT,
+    checkpoint_tag TEXT,
+    retry_count INTEGER DEFAULT 0,
+    max_retries INTEGER DEFAULT 1,
+    session_id TEXT,
+    created_at TEXT DEFAULT (datetime('now','localtime')),
+    completed_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS discoveries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_task TEXT,
+    description TEXT NOT NULL,
+    severity TEXT DEFAULT 'medium',
+    consumed INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now','localtime'))
+);
+
+CREATE TABLE IF NOT EXISTS cycle_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    cycle_num INTEGER,
+    phase TEXT,
+    task_id TEXT,
+    model TEXT,
+    summary TEXT,
+    exit_code INTEGER,
+    duration_sec INTEGER,
+    created_at TEXT DEFAULT (datetime('now','localtime'))
+);
+
+PRAGMA journal_mode=WAL;
+"""
+
+MIGRATION_SQLS = [
+    # Idempotent migrations
+    "ALTER TABLE tasks ADD COLUMN session_id TEXT;",
+]
+
+
+# ── Subcommands ──
+
+def cmd_init(args):
+    project = args.project
+    project_dir = ensure_project_dir(project)
+    db_path = project_dir / "ralph.db"
+
+    if db_path.exists():
+        # Run migrations
+        conn = sqlite3.connect(str(db_path), timeout=5.0)
+        conn.execute("PRAGMA journal_mode=WAL")
+        for sql in MIGRATION_SQLS:
+            try:
+                conn.execute(sql)
+            except sqlite3.OperationalError:
+                pass  # Column already exists
+        conn.commit()
+        conn.close()
+        print(f"Database already exists: {db_path}", file=sys.stderr)
+    else:
+        conn = sqlite3.Connection(str(db_path))
+        conn.executescript(SCHEMA_SQL)
+        conn.close()
+        print(f"Initialized database: {db_path}", file=sys.stderr)
+
+    print(json.dumps({"project": project, "db": str(db_path), "dir": str(project_dir)}))
+
+
+def cmd_add_task(args):
+    project = args.project
+    prompt = args.prompt
+    if prompt == "-":
+        prompt = sys.stdin.read()
+
+    conn = get_connection(project)
+    conn.execute(
+        """INSERT OR IGNORE INTO tasks
+           (id, title, priority, model, complexity, prompt, context_files, source)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (args.id, args.title, args.priority, args.model, args.complexity,
+         prompt, args.files or "", args.source),
+    )
+    conn.commit()
+    conn.close()
+    print(json.dumps({"ok": True, "id": args.id}))
+
+
+def cmd_get_task(args):
+    conn = get_connection(args.project)
+    rows = conn.execute("SELECT * FROM tasks WHERE id=?", (args.task_id,)).fetchall()
+    conn.close()
+    print(rows_to_json(rows))
+
+
+def cmd_list_pending(args):
+    conn = get_connection(args.project)
+    rows = conn.execute(
+        "SELECT * FROM tasks WHERE status='pending' ORDER BY priority ASC, created_at ASC"
+    ).fetchall()
+    conn.close()
+    print(rows_to_json(rows))
+
+
+def cmd_list_all(args):
+    conn = get_connection(args.project)
+    rows = conn.execute(
+        "SELECT * FROM tasks ORDER BY status, priority ASC, created_at ASC"
+    ).fetchall()
+    conn.close()
+    print(rows_to_json(rows))
+
+
+def cmd_count_pending(args):
+    conn = get_connection(args.project)
+    count = conn.execute("SELECT COUNT(*) FROM tasks WHERE status='pending'").fetchone()[0]
+    conn.close()
+    print(str(count))
+
+
+def cmd_update_status(args):
+    conn = get_connection(args.project)
+    status = args.status
+    if status in ("done", "failed"):
+        conn.execute(
+            "UPDATE tasks SET status=?, completed_at=datetime('now','localtime') WHERE id=?",
+            (status, args.task_id),
+        )
+    else:
+        conn.execute("UPDATE tasks SET status=? WHERE id=?", (status, args.task_id))
+    conn.commit()
+    conn.close()
+    print(json.dumps({"ok": True}))
+
+
+def cmd_update_result(args):
+    conn = get_connection(args.project)
+    conn.execute(
+        "UPDATE tasks SET result=?, checkpoint_tag=? WHERE id=?",
+        (args.result, args.checkpoint or "", args.task_id),
+    )
+    conn.commit()
+    conn.close()
+    print(json.dumps({"ok": True}))
+
+
+def cmd_update_priority(args):
+    conn = get_connection(args.project)
+    conn.execute("UPDATE tasks SET priority=? WHERE id=?", (args.priority, args.task_id))
+    conn.commit()
+    conn.close()
+    print(json.dumps({"ok": True}))
+
+
+def cmd_update_model(args):
+    conn = get_connection(args.project)
+    conn.execute("UPDATE tasks SET model=? WHERE id=?", (args.model, args.task_id))
+    conn.commit()
+    conn.close()
+    print(json.dumps({"ok": True}))
+
+
+def cmd_update_session(args):
+    conn = get_connection(args.project)
+    conn.execute("UPDATE tasks SET session_id=? WHERE id=?", (args.session_id, args.task_id))
+    conn.commit()
+    conn.close()
+    print(json.dumps({"ok": True}))
+
+
+def cmd_get_session(args):
+    conn = get_connection(args.project)
+    row = conn.execute("SELECT session_id FROM tasks WHERE id=?", (args.task_id,)).fetchone()
+    conn.close()
+    if row and row[0]:
+        print(row[0])
+    else:
+        print("")
+
+
+def cmd_increment_retry(args):
+    conn = get_connection(args.project)
+    conn.execute("UPDATE tasks SET retry_count=retry_count+1 WHERE id=?", (args.task_id,))
+    conn.commit()
+    conn.close()
+    print(json.dumps({"ok": True}))
+
+
+def cmd_get_retry_info(args):
+    conn = get_connection(args.project)
+    row = conn.execute(
+        "SELECT retry_count, max_retries FROM tasks WHERE id=?", (args.task_id,)
+    ).fetchone()
+    conn.close()
+    if row:
+        # Output in pipe-separated format for backward compatibility
+        print(f"{row[0]}|{row[1]}")
+    else:
+        print("0|1")
+
+
+def cmd_delete_task(args):
+    conn = get_connection(args.project)
+    conn.execute("DELETE FROM tasks WHERE id=?", (args.task_id,))
+    conn.commit()
+    conn.close()
+    print(json.dumps({"ok": True}))
+
+
+def cmd_add_discovery(args):
+    description = args.description
+    if description == "-":
+        description = sys.stdin.read()
+    conn = get_connection(args.project)
+    conn.execute(
+        "INSERT INTO discoveries (source_task, description, severity) VALUES (?, ?, ?)",
+        (args.source_task, description, args.severity),
+    )
+    conn.commit()
+    conn.close()
+    print(json.dumps({"ok": True}))
+
+
+def cmd_get_unconsumed_discoveries(args):
+    conn = get_connection(args.project)
+    rows = conn.execute(
+        "SELECT * FROM discoveries WHERE consumed=0 ORDER BY created_at ASC"
+    ).fetchall()
+    conn.close()
+    print(rows_to_json(rows))
+
+
+def cmd_consume_discoveries(args):
+    conn = get_connection(args.project)
+    conn.execute("UPDATE discoveries SET consumed=1 WHERE consumed=0")
+    conn.commit()
+    conn.close()
+    print(json.dumps({"ok": True}))
+
+
+def cmd_log_cycle(args):
+    summary = args.summary
+    if summary == "-":
+        summary = sys.stdin.read()
+    conn = get_connection(args.project)
+    conn.execute(
+        """INSERT INTO cycle_log
+           (cycle_num, phase, task_id, model, summary, exit_code, duration_sec)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (args.cycle, args.phase, args.task_id, args.model, summary,
+         args.exit_code, args.duration),
+    )
+    conn.commit()
+    conn.close()
+    print(json.dumps({"ok": True}))
+
+
+def cmd_get_last_cycle_log(args):
+    conn = get_connection(args.project)
+    rows = conn.execute("SELECT * FROM cycle_log ORDER BY id DESC LIMIT 1").fetchall()
+    conn.close()
+    print(rows_to_json(rows))
+
+
+def cmd_get_today_cycle_logs(args):
+    conn = get_connection(args.project)
+    rows = conn.execute(
+        "SELECT * FROM cycle_log WHERE date(created_at)=date('now','localtime') ORDER BY id ASC"
+    ).fetchall()
+    conn.close()
+    print(rows_to_json(rows))
+
+
+def cmd_get_today_completed_tasks(args):
+    conn = get_connection(args.project)
+    rows = conn.execute(
+        """SELECT * FROM tasks
+           WHERE status IN ('done','failed')
+             AND date(completed_at)=date('now','localtime')
+           ORDER BY completed_at ASC"""
+    ).fetchall()
+    conn.close()
+    print(rows_to_json(rows))
+
+
+def cmd_resolve_project(args):
+    """Resolve a project slug from a directory path.
+
+    Strategy:
+    1. Check .ralph.yaml in the directory for 'project:' key
+    2. Try to derive from git remote URL
+    3. Fall back to directory basename
+    """
+    path = Path(args.path).resolve()
+
+    # 1. Check .ralph.yaml
+    ralph_yaml = path / ".ralph.yaml"
+    if ralph_yaml.exists():
+        content = ralph_yaml.read_text()
+        for line in content.splitlines():
+            m = re.match(r'^project:\s*(.+)', line)
+            if m:
+                slug = m.group(1).strip().strip("'\"")
+                if slug:
+                    print(slug)
+                    return
+
+    # 2. Try git remote
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(path), "remote", "get-url", "origin"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            url = result.stdout.strip()
+            # Extract repo name from URL
+            # git@github.com:user/repo.git -> repo
+            # https://github.com/user/repo.git -> repo
+            name = url.rstrip("/").split("/")[-1]
+            if name.endswith(".git"):
+                name = name[:-4]
+            if name:
+                print(name)
+                return
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+
+    # 3. Fall back to directory name
+    print(path.name)
+
+
+def cmd_query(args):
+    """Run an arbitrary SQL query (read-only convenience).
+
+    For single-row, single-column results (e.g. SELECT COUNT(*)),
+    outputs the plain scalar value instead of JSON.
+    """
+    conn = get_connection(args.project)
+    try:
+        rows = conn.execute(args.sql).fetchall()
+        # Detect scalar result: single row, single column
+        if len(rows) == 1 and len(rows[0].keys()) == 1:
+            val = list(dict(rows[0]).values())[0]
+            print(val if val is not None else "0")
+        else:
+            print(rows_to_json(rows))
+    except sqlite3.Error as e:
+        print(f"SQL error: {e}", file=sys.stderr)
+        sys.exit(1)
+    finally:
+        conn.close()
+
+
+def cmd_task_stats(args):
+    """Get task count by status."""
+    conn = get_connection(args.project)
+    rows = conn.execute(
+        "SELECT status, COUNT(*) as count FROM tasks GROUP BY status"
+    ).fetchall()
+    conn.close()
+    stats = {row["status"]: row["count"] for row in rows}
+    print(json.dumps(stats, ensure_ascii=False))
+
+
+# ── CLI ──
+
+def main():
+    parser = argparse.ArgumentParser(description="Ralph data layer (Python + SQLite)")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    # init
+    p = subparsers.add_parser("init")
+    p.add_argument("project")
+    p.set_defaults(func=cmd_init)
+
+    # add-task
+    p = subparsers.add_parser("add-task")
+    p.add_argument("project")
+    p.add_argument("--id", required=True)
+    p.add_argument("--title", required=True)
+    p.add_argument("--priority", type=int, default=3)
+    p.add_argument("--model", default="claude-sonnet-4-6")
+    p.add_argument("--complexity", default="simple")
+    p.add_argument("--prompt", default="-", help="Task prompt (use - for stdin)")
+    p.add_argument("--files", default="")
+    p.add_argument("--source", default="manual")
+    p.set_defaults(func=cmd_add_task)
+
+    # get-task
+    p = subparsers.add_parser("get-task")
+    p.add_argument("project")
+    p.add_argument("task_id")
+    p.set_defaults(func=cmd_get_task)
+
+    # list-pending
+    p = subparsers.add_parser("list-pending")
+    p.add_argument("project")
+    p.set_defaults(func=cmd_list_pending)
+
+    # list-all
+    p = subparsers.add_parser("list-all")
+    p.add_argument("project")
+    p.set_defaults(func=cmd_list_all)
+
+    # count-pending
+    p = subparsers.add_parser("count-pending")
+    p.add_argument("project")
+    p.set_defaults(func=cmd_count_pending)
+
+    # update-status
+    p = subparsers.add_parser("update-status")
+    p.add_argument("project")
+    p.add_argument("task_id")
+    p.add_argument("status")
+    p.set_defaults(func=cmd_update_status)
+
+    # update-result
+    p = subparsers.add_parser("update-result")
+    p.add_argument("project")
+    p.add_argument("task_id")
+    p.add_argument("--result", required=True)
+    p.add_argument("--checkpoint", default="")
+    p.set_defaults(func=cmd_update_result)
+
+    # update-priority
+    p = subparsers.add_parser("update-priority")
+    p.add_argument("project")
+    p.add_argument("task_id")
+    p.add_argument("priority", type=int)
+    p.set_defaults(func=cmd_update_priority)
+
+    # update-model
+    p = subparsers.add_parser("update-model")
+    p.add_argument("project")
+    p.add_argument("task_id")
+    p.add_argument("model")
+    p.set_defaults(func=cmd_update_model)
+
+    # update-session
+    p = subparsers.add_parser("update-session")
+    p.add_argument("project")
+    p.add_argument("task_id")
+    p.add_argument("session_id")
+    p.set_defaults(func=cmd_update_session)
+
+    # get-session
+    p = subparsers.add_parser("get-session")
+    p.add_argument("project")
+    p.add_argument("task_id")
+    p.set_defaults(func=cmd_get_session)
+
+    # increment-retry
+    p = subparsers.add_parser("increment-retry")
+    p.add_argument("project")
+    p.add_argument("task_id")
+    p.set_defaults(func=cmd_increment_retry)
+
+    # get-retry-info
+    p = subparsers.add_parser("get-retry-info")
+    p.add_argument("project")
+    p.add_argument("task_id")
+    p.set_defaults(func=cmd_get_retry_info)
+
+    # delete-task
+    p = subparsers.add_parser("delete-task")
+    p.add_argument("project")
+    p.add_argument("task_id")
+    p.set_defaults(func=cmd_delete_task)
+
+    # add-discovery
+    p = subparsers.add_parser("add-discovery")
+    p.add_argument("project")
+    p.add_argument("--source-task", required=True)
+    p.add_argument("--description", required=True, help="Use - for stdin")
+    p.add_argument("--severity", default="medium")
+    p.set_defaults(func=cmd_add_discovery)
+
+    # get-unconsumed-discoveries
+    p = subparsers.add_parser("get-unconsumed-discoveries")
+    p.add_argument("project")
+    p.set_defaults(func=cmd_get_unconsumed_discoveries)
+
+    # consume-discoveries
+    p = subparsers.add_parser("consume-discoveries")
+    p.add_argument("project")
+    p.set_defaults(func=cmd_consume_discoveries)
+
+    # log-cycle
+    p = subparsers.add_parser("log-cycle")
+    p.add_argument("project")
+    p.add_argument("--cycle", type=int, required=True)
+    p.add_argument("--phase", required=True)
+    p.add_argument("--task-id", required=True)
+    p.add_argument("--model", default="")
+    p.add_argument("--summary", default="-", help="Use - for stdin")
+    p.add_argument("--exit-code", type=int, default=0)
+    p.add_argument("--duration", type=int, default=0)
+    p.set_defaults(func=cmd_log_cycle)
+
+    # get-last-cycle-log
+    p = subparsers.add_parser("get-last-cycle-log")
+    p.add_argument("project")
+    p.set_defaults(func=cmd_get_last_cycle_log)
+
+    # get-today-cycle-logs
+    p = subparsers.add_parser("get-today-cycle-logs")
+    p.add_argument("project")
+    p.set_defaults(func=cmd_get_today_cycle_logs)
+
+    # get-today-completed-tasks
+    p = subparsers.add_parser("get-today-completed-tasks")
+    p.add_argument("project")
+    p.set_defaults(func=cmd_get_today_completed_tasks)
+
+    # resolve-project
+    p = subparsers.add_parser("resolve-project")
+    p.add_argument("path")
+    p.set_defaults(func=cmd_resolve_project)
+
+    # query
+    p = subparsers.add_parser("query")
+    p.add_argument("project")
+    p.add_argument("sql")
+    p.set_defaults(func=cmd_query)
+
+    # task-stats
+    p = subparsers.add_parser("task-stats")
+    p.add_argument("project")
+    p.set_defaults(func=cmd_task_stats)
+
+    args = parser.parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()

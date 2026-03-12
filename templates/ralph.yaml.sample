@@ -1,0 +1,23 @@
+# Ralph CLI 项目配置
+# 将此文件复制到项目根目录并重命名为 .ralph.yaml
+
+project: my-project           # 项目标识（不填则从 git remote 推导）
+
+verify:
+  symlink_node_modules: true   # 自动 ln -s 主项目 node_modules
+  commands:
+    - pnpm type-check          # 阻断性验证命令
+    # - pnpm test:priority     # 可选的测试命令
+
+changeset:
+  enabled: false               # 是否创建 changeset
+  # package: my-package        # changeset 包名
+
+merge_target: main             # ralph merge 的目标分支
+skip_hooks: true               # HUSKY=0 + --no-verify
+
+# 可覆盖全局配置
+# source: repo
+# inbox_repo: git@github.com:user/inbox.git
+# webhook_url: https://...
+# default_model: claude-sonnet-4-6

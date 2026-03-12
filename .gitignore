@@ -1,0 +1,6 @@
+# Ralph CLI
+config.yaml
+*.db
+*.log
+*.pid
+.DS_Store
