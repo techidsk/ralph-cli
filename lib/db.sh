@@ -125,35 +125,5 @@ ralph_db_get_today_completed_tasks() {
   "$RALPH_DB_BIN" get-today-completed-tasks "$RALPH_PROJECT"
 }
 
-# ── 兼容层: ralph_sqlite (供旧代码调用) ──
-
-ralph_sqlite() {
-  # 兼容旧代码中直接调用 ralph_sqlite 的场景
-  # 新代码应直接使用 ralph_db_* 函数或 ralph-db query
-  local db_file=""
-  local args=()
-  local json_mode=false
-
-  for arg in "$@"; do
-    if [[ "$arg" == "-json" ]]; then
-      json_mode=true
-    elif [[ "$arg" == "-separator" ]]; then
-      # 跳过 -separator 和下一个参数
-      continue
-    elif [[ "$arg" == "$RALPH_DB" ]]; then
-      db_file="$arg"
-    elif [[ -z "$db_file" ]]; then
-      args+=("$arg")
-    else
-      args+=("$arg")
-    fi
-  done
-
-  # 使用 ralph-db query 处理
-  if [[ ${#args[@]} -gt 0 ]]; then
-    "$RALPH_DB_BIN" query "$RALPH_PROJECT" "${args[-1]}" 2>/dev/null
-  fi
-}
-
 # ── 自动初始化 ──
 ralph_db_init

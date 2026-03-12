@@ -51,7 +51,6 @@ Ralph Loop — 自动化任务执行系统
   ralph clean            清理孤儿 worktree 和临时文件
   ralph init             初始化当前项目
   ralph projects         列出所有已注册项目
-  ralph migrate-legacy   迁移旧数据到多项目结构
   ralph help             显示此帮助
 
 添加任务选项:
@@ -408,79 +407,6 @@ cmd_projects() {
   done
 }
 
-cmd_migrate_legacy() {
-  echo "=== 迁移旧数据 ==="
-
-  local legacy_db="$RALPH_HOME/ralph.db"
-  local legacy_log="$RALPH_HOME/ralph.log"
-  local legacy_brief="$RALPH_HOME/context-brief.md"
-  local legacy_lessons="$RALPH_HOME/lessons.md"
-  local legacy_discoveries="$RALPH_HOME/discoveries.md"
-  local legacy_pid="$RALPH_HOME/ralph.pid"
-  local legacy_paused="$RALPH_HOME/PAUSED"
-  local legacy_reports="$RALPH_HOME/reports"
-  local legacy_inbox_repo="$RALPH_HOME/inbox-repo"
-
-  # 确定迁移目标项目
-  local target_project=""
-  target_project="$("$RALPH_DB_BIN" resolve-project "$RALPH_CWD" 2>/dev/null)" || target_project="default"
-
-  echo "将旧数据迁移到项目: $target_project"
-
-  local target_dir="$RALPH_HOME/projects/$target_project"
-  mkdir -p "$target_dir"
-
-  local migrated=0
-
-  # 迁移数据库
-  if [[ -f "$legacy_db" && ! -f "$target_dir/ralph.db" ]]; then
-    mv "$legacy_db" "$target_dir/ralph.db"
-    echo "  已迁移: ralph.db"
-    migrated=$((migrated + 1))
-  fi
-
-  # 迁移日志
-  if [[ -f "$legacy_log" && ! -f "$target_dir/ralph.log" ]]; then
-    mv "$legacy_log" "$target_dir/ralph.log"
-    echo "  已迁移: ralph.log"
-    migrated=$((migrated + 1))
-  fi
-
-  # 迁移 context 文件
-  for file in "$legacy_brief" "$legacy_lessons" "$legacy_discoveries" "$legacy_pid" "$legacy_paused"; do
-    if [[ -f "$file" ]]; then
-      local basename
-      basename="$(basename "$file")"
-      if [[ ! -f "$target_dir/$basename" ]]; then
-        mv "$file" "$target_dir/$basename"
-        echo "  已迁移: $basename"
-        migrated=$((migrated + 1))
-      fi
-    fi
-  done
-
-  # 迁移 reports 目录
-  if [[ -d "$legacy_reports" && ! -d "$target_dir/reports" ]]; then
-    mv "$legacy_reports" "$target_dir/reports"
-    echo "  已迁移: reports/"
-    migrated=$((migrated + 1))
-  fi
-
-  # 迁移 inbox-repo
-  if [[ -d "$legacy_inbox_repo" && ! -d "$target_dir/inbox-repo" ]]; then
-    mv "$legacy_inbox_repo" "$target_dir/inbox-repo"
-    echo "  已迁移: inbox-repo/"
-    migrated=$((migrated + 1))
-  fi
-
-  if [[ $migrated -eq 0 ]]; then
-    echo "  无需迁移（已是最新结构或无旧数据）"
-  else
-    echo ""
-    echo "共迁移 $migrated 项。旧数据已移至 $target_dir/"
-  fi
-}
-
 cmd_restart() {
   echo "=== 重启 Ralph (项目: $RALPH_PROJECT) ==="
 
@@ -818,6 +744,5 @@ case "${1:-help}" in
   clean|cleanup)  cmd_clean ;;
   init)           cmd_init ;;
   projects)       cmd_projects ;;
-  migrate-legacy) cmd_migrate_legacy ;;
   help|*)         usage ;;
 esac

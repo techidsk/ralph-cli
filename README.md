@@ -116,7 +116,6 @@ ralph <command>
 | `merge [branch]` | 将 nightly 分支合并到目标分支（从 `.ralph.yaml` 读取） |
 | `report` | 手动触发生成晨报 |
 | `projects` | 列出所有已注册项目及状态 |
-| `migrate-legacy` | 将旧版 `~/.ralph/` 扁平数据迁移到多项目结构 |
 | `help` | 显示帮助 |
 
 ### add 参数
