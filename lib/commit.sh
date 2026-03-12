@@ -51,8 +51,12 @@ ralph_commit() {
   local patch_dir="/tmp/ralph-patches-$$"
   mkdir -p "$patch_dir"
 
+  # 读取 base_ref（execute.sh 写入），支持多 commit
+  local base_ref
+  base_ref="$(cat "/tmp/ralph-baseref-$task_id" 2>/dev/null || echo 'HEAD~1')"
+
   local patch_count
-  patch_count="$(cd "$worktree" && git format-patch -o "$patch_dir" HEAD~1 2>/dev/null | wc -l | tr -d ' ')"
+  patch_count="$(cd "$worktree" && git format-patch -o "$patch_dir" "$base_ref"..HEAD 2>/dev/null | wc -l | tr -d ' ')"
 
   if [[ "$patch_count" -eq 0 ]]; then
     ralph_log_warn "COMMIT: No patches generated for $task_id (worktree has no commits ahead of HEAD?)"
@@ -78,42 +82,6 @@ ralph_commit() {
 
   cd "$nightly_wt"
 
-  # 判断 commit 类型
-  local commit_type="feat"
-  if echo "$task_title" | grep -qiE '(fix|修复|bug|问题|缺少|丢失|遮挡|异常|错误|失败)'; then
-    commit_type="fix"
-  elif echo "$task_title" | grep -qiE '(refactor|重构|优化)'; then
-    commit_type="refactor"
-  elif echo "$task_title" | grep -qiE '(style|样式|颜色|UI)'; then
-    commit_type="style"
-  fi
-
-  # 从改动文件路径推断 scope
-  local commit_scope=""
-  local changed_files
-  changed_files="$(cd "$worktree" && git diff --name-only HEAD~1 2>/dev/null | grep -v '^\.changeset/' || echo "")"
-  if [[ -n "$changed_files" ]]; then
-    local app_path
-    app_path="$(echo "$changed_files" | grep -oE 'src/app/(\[lang\]/\([^)]+\)/|api/)([^/]+)' | head -1 | sed -E 's|.*/(.*)|\1|')"
-    if [[ -n "$app_path" ]]; then
-      commit_scope="$app_path"
-    else
-      local comp_path
-      comp_path="$(echo "$changed_files" | grep -oE 'src/(components|features|server)/([^/]+)' | head -1 | sed -E 's|.*/(.*)|\1|')"
-      if [[ -n "$comp_path" ]]; then
-        commit_scope="$comp_path"
-      else
-        commit_scope="$(echo "$changed_files" | head -1 | xargs dirname | xargs basename)"
-      fi
-    fi
-  fi
-  [[ -z "$commit_scope" ]] && commit_scope="general"
-
-  # 去掉 title 标签前缀
-  local subject
-  subject="$(echo "$task_title" | sed -E 's/^\[(BUG|需求|优化|FEAT)\] *//')"
-  subject="$(echo "$subject" | cut -c1-50)"
-
   # hook 控制: 读 RALPH_SKIP_HOOKS
   local env_prefix=""
   local commit_flags=""
@@ -134,13 +102,16 @@ ralph_commit() {
     local apply_output
     apply_output="$(git apply --3way "$patch_dir"/*.patch 2>&1)" && {
       git add -A >/dev/null 2>&1
-      local conflict_msg="$commit_type($commit_scope): $subject (conflict resolved)
+      # 从 patch 文件提取 Claude 生成的原始 commit message
+      local original_msg
+      original_msg="$(sed -n 's/^Subject: \[PATCH[^]]*\] //p' "$patch_dir"/*.patch | head -1)"
+      local fallback_msg="${original_msg:-chore: apply task $task_id (conflict resolved)}
 
 task-id: $task_id"
       if [[ -n "$env_prefix" ]]; then
-        env $env_prefix git commit -m "$conflict_msg" $commit_flags >/dev/null 2>&1
+        env $env_prefix git commit -m "$fallback_msg" $commit_flags >/dev/null 2>&1
       else
-        git commit -m "$conflict_msg" >/dev/null 2>&1
+        git commit -m "$fallback_msg" >/dev/null 2>&1
       fi
       apply_success=1
       ralph_log_info "COMMIT: Patches applied via git apply fallback (conflict resolved)"
@@ -164,6 +135,11 @@ task-id: $task_id"
       local changeset_name="ralph-${task_id}"
       local changeset_dir="$nightly_wt/.changeset"
       mkdir -p "$changeset_dir"
+
+      # 去掉 title 标签前缀，用于 changeset 描述
+      local subject
+      subject="$(echo "$task_title" | sed -E 's/^\[(BUG|需求|优化|FEAT)\] *//')"
+      subject="$(echo "$subject" | cut -c1-50)"
 
       local change_type="patch"
       if echo "$task_title" | grep -qiE '(feat|feature|新增|添加)'; then

@@ -147,6 +147,7 @@ ralph_finalize_task() {
     ralph_notify "task_failed" "$task_id" "$task_title" "验证失败" 2>/dev/null || true
     ralph_daily_log "task_failed" "$task_id" "$task_title" "Verification failed"
     ralph_rollback_worktree "$worktree" "$task_id"
+    rm -f "/tmp/ralph-baseref-$task_id"
     return 1
   fi
 
@@ -160,6 +161,7 @@ ralph_finalize_task() {
     ralph_notify "task_failed" "$task_id" "$task_title" "提交失败" 2>/dev/null || true
     ralph_daily_log "task_failed" "$task_id" "$task_title" "Commit failed"
     ralph_rollback_worktree "$worktree" "$task_id" 2>/dev/null || true
+    rm -f "/tmp/ralph-baseref-$task_id"
     return 1
   }
 
@@ -169,6 +171,9 @@ ralph_finalize_task() {
   ralph_update_context_brief "$task_id" "$task_title" "$checkpoint_tag"
 
   ralph_log_info "✓ Task $task_id completed: $checkpoint_tag"
+
+  # 清理临时文件
+  rm -f "/tmp/ralph-baseref-$task_id"
 
   ralph_push_to_outbox "$task_id" "done" "Completed successfully" "$checkpoint_tag" 2>/dev/null || true
   ralph_notify "task_done" "$task_id" "$task_title" "checkpoint: $checkpoint_tag" 2>/dev/null || true

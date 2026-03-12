@@ -31,16 +31,13 @@ RALPH_POLL_INTERVAL: 600
 # Reflect 阶段模型
 # RALPH_REFLECT_MODEL: claude-sonnet-4-6
 
-# Verify 阶段 review 模型
-# RALPH_REVIEW_MODEL: claude-haiku-4-5-20251001
-
 # ── 执行限制 ──
 
-# 简单任务最大轮次
-# RALPH_MAX_TURNS_SIMPLE: 15
+# 简单任务最大轮次（单次 session 含 execute + verify + commit）
+# RALPH_MAX_TURNS_SIMPLE: 35
 
 # 复杂任务最大轮次
-# RALPH_MAX_TURNS_COMPLEX: 30
+# RALPH_MAX_TURNS_COMPLEX: 55
 
 # ── 通知 ──
 

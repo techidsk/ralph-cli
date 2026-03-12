@@ -628,7 +628,6 @@ cmd_config() {
   echo "── 模型 ──"
   echo "  RALPH_DEFAULT_MODEL:  $RALPH_DEFAULT_MODEL"
   echo "  RALPH_REFLECT_MODEL:  $RALPH_REFLECT_MODEL"
-  echo "  RALPH_REVIEW_MODEL:   $RALPH_REVIEW_MODEL"
   echo ""
   echo "── 执行 ──"
   echo "  RALPH_MAX_CONCURRENT:       $RALPH_MAX_CONCURRENT"

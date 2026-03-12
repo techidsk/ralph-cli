@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Ralph CLI — 任务执行 (Worktree + Claude 调用)
+# Claude Code 负责: 改代码、验证、修复、提交
+# Ralph 只负责: 调度、worktree 管理、nightly 分支
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -48,7 +50,27 @@ ralph_execute() {
   }
   ralph_log_info "Created worktree: $worktree (branch: $branch, base: $base_ref)"
 
-  # 构建增强 prompt
+  # 保存 base_ref 供 commit.sh 使用（多 commit format-patch）
+  echo "$base_ref" > "/tmp/ralph-baseref-$task_id"
+
+  # node_modules 符号链接（让 Claude 运行验证命令时能找到依赖）
+  if [[ "${RALPH_VERIFY_SYMLINK_NODE_MODULES:-true}" == "true" ]]; then
+    if [[ ! -d "$worktree/node_modules" && -d "$RALPH_CWD/node_modules" ]]; then
+      ln -s "$RALPH_CWD/node_modules" "$worktree/node_modules" 2>/dev/null || true
+    fi
+    for pkg_nm in "$RALPH_CWD"/packages/*/node_modules; do
+      [[ -d "$pkg_nm" ]] || continue
+      local pkg_rel="${pkg_nm#$RALPH_CWD/}"
+      local pkg_dir
+      pkg_dir="$(dirname "$pkg_rel")"
+      if [[ ! -d "$worktree/$pkg_rel" ]]; then
+        mkdir -p "$worktree/$pkg_dir" 2>/dev/null || true
+        ln -s "$pkg_nm" "$worktree/$pkg_rel" 2>/dev/null || true
+      fi
+    done
+  fi
+
+  # 构建增强 prompt —— 单次调用完成 execute + verify + commit
   local enhanced_prompt=""
 
   # 注入 context-brief
@@ -75,42 +97,61 @@ $(cat "$RALPH_LESSONS")
 "
   fi
 
+  # 复杂任务提示
+  if [[ "$complexity" == "complex" ]]; then
+    enhanced_prompt+="注意: 这是一个复杂任务。在动手修改前，先制定实现计划（列出步骤和涉及文件），然后按计划执行。
+
+"
+  fi
+
+  # 构建验证命令段
+  local verify_section=""
+  if [[ -n "${RALPH_VERIFY_COMMANDS:-}" ]]; then
+    verify_section="## 验证
+完成代码修改后，逐条运行以下命令验证:
+"
+    IFS='|' read -ra _verify_cmds <<< "$RALPH_VERIFY_COMMANDS"
+    for _cmd in "${_verify_cmds[@]}"; do
+      [[ -z "$_cmd" ]] && continue
+      verify_section+="- \`$_cmd\`
+"
+    done
+    verify_section+="如果失败，修复后重新运行，直到全部通过。
+
+"
+  fi
+
+  # 构建 hook 控制提示
+  local hook_hint=""
+  if [[ "${RALPH_SKIP_HOOKS:-false}" == "true" ]]; then
+    hook_hint="- hook 控制: 提交时使用 HUSKY=0 git commit --no-verify"
+  fi
+
   enhanced_prompt+="## 任务
 $prompt
 
-## 重要规则
-1. 你在一个 git worktree 中工作，当前目录就是项目根目录
+${verify_section}## 提交
+所有验证通过后（或没有验证命令时，完成代码修改后），提交你的修改:
+- 使用 conventional commits 格式: type(scope): 描述
+- commit body 中包含 \"task-id: $task_id\"
+- 遵循项目 CLAUDE.md 中的 commit 规范（如果存在）
+${hook_hint}
+
+## 规则
+1. 你在 git worktree 中工作，当前目录是项目根
 2. 只做任务要求的修改，不要过度工程化
-3. 遵循项目 CLAUDE.md 中的代码规范（如果存在）
-4. 如果发现代码中其他问题（不在本次任务范围），将发现追加到 $RALPH_DISCOVERIES 文件，每行一个 JSON:
+3. 遵循项目 CLAUDE.md 规范（如果存在）
+4. 可以使用项目中定义的 skill
+5. 发现其他问题追加到 $RALPH_DISCOVERIES 文件（JSON 格式）:
    {\"description\":\"问题描述\",\"source_task\":\"$task_id\",\"severity\":\"low|medium|high\"}
-5. 不要提交代码，只做修改
 "
 
   local max_turns="$RALPH_MAX_TURNS_SIMPLE"
-  local exit_code=0
-
   if [[ "$complexity" == "complex" ]]; then
     max_turns="$RALPH_MAX_TURNS_COMPLEX"
-
-    # complex 任务: 先规划再执行
-    ralph_log_info "Complex task — running planning phase first"
-    local plan_prompt="分析以下任务并制定实现计划，列出具体步骤和需要修改的文件:
-
-$prompt"
-
-    local plan_result
-    plan_result="$(cd "$worktree" && claude -p "$plan_prompt" --model "$model" --max-turns 5 --dangerously-skip-permissions --output-format text 2>/dev/null </dev/null)" || true
-
-    enhanced_prompt="## 实现计划
-$plan_result
-
----
-
-现在按照上述计划执行实现:
-
-$enhanced_prompt"
   fi
+
+  local exit_code=0
 
   # 执行主调用
   ralph_log_info "Calling Claude (model=$model, max-turns=$max_turns)..."
@@ -161,114 +202,68 @@ $enhanced_prompt"
   local duration=$(( $(date +%s) - start_time ))
   ralph_log_info "Execute completed in ${duration}s (exit=$exit_code)"
 
-  # 检查 worktree 是否有改动
-  local has_changes
-  has_changes="$(cd "$worktree" && git diff --stat HEAD 2>/dev/null || echo "")"
-  if [[ -z "$has_changes" ]]; then
-    has_changes="$(cd "$worktree" && git status --short 2>/dev/null || echo "")"
-  fi
+  # 检查 worktree 是否有新 commit（Claude 自己提交）
+  local commit_count
+  commit_count="$(cd "$worktree" && git rev-list --count "$base_ref"..HEAD 2>/dev/null || echo "0")"
 
-  if [[ -z "$has_changes" ]]; then
-    # ── No changes: 用更多 turns 重试一次 ──
-    local escalated_turns=$((max_turns + 15))
-    ralph_log_warn "No changes detected, retrying with escalated turns ($escalated_turns)..."
+  if [[ "$commit_count" -eq 0 ]]; then
+    # 检查是否有未提交的改动（Claude 改了代码但忘了 commit）
+    local uncommitted_changes
+    uncommitted_changes="$(cd "$worktree" && git status --short 2>/dev/null || echo "")"
 
-    local retry_prompt="你刚才分析了代码但没有做任何修改。请重新执行任务，这次直接动手修改代码。
+    if [[ -n "$uncommitted_changes" ]]; then
+      # Claude 有改动但没 commit，追加 prompt 要求提交
+      ralph_log_warn "Changes detected but no commit, asking Claude to commit..."
+      local commit_prompt="你已经完成了代码修改，但还没有提交。请现在提交你的修改:
+- 使用 conventional commits 格式: type(scope): 描述
+- commit body 中包含 \"task-id: $task_id\"
+${hook_hint}"
+
+      if [[ -n "$final_session" ]]; then
+        cd "$worktree" && claude --resume "$final_session" -p "$commit_prompt" --model "$model" --max-turns 5 --dangerously-skip-permissions --output-format text 2>/dev/null </dev/null || true
+      else
+        cd "$worktree" && claude -p "$commit_prompt" --model "$model" --max-turns 5 --dangerously-skip-permissions --output-format text 2>/dev/null </dev/null || true
+      fi
+
+      # 重新检查
+      commit_count="$(cd "$worktree" && git rev-list --count "$base_ref"..HEAD 2>/dev/null || echo "0")"
+    fi
+
+    if [[ "$commit_count" -eq 0 ]]; then
+      # 仍然没有 commit —— 用更多 turns 重试一次
+      local escalated_turns=$((max_turns + 15))
+      ralph_log_warn "No commits detected, retrying with escalated turns ($escalated_turns)..."
+
+      local retry_prompt="你刚才分析了代码但没有做任何修改。请重新执行任务，这次直接动手修改代码。
 
 任务要求:
 $prompt
 
-重要: 你必须修改文件来完成任务。如果你不确定要改哪里，先用 grep/glob 搜索相关代码，然后直接修改。不要只分析不动手。"
+重要: 你必须修改文件来完成任务，然后提交。如果你不确定要改哪里，先用 grep/glob 搜索相关代码，然后直接修改。不要只分析不动手。
+完成后使用 conventional commits 格式提交，body 中包含 \"task-id: $task_id\"。
+${hook_hint}"
 
-    local retry_result retry_exit=0
-    local final_session="${session_id:-$existing_session}"
-    if [[ -n "$final_session" ]]; then
-      retry_result="$(cd "$worktree" && claude --resume "$final_session" -p "$retry_prompt" --model "$model" --max-turns "$escalated_turns" --dangerously-skip-permissions --output-format text 2>/dev/null </dev/null)" || retry_exit=$?
-    else
-      retry_result="$(cd "$worktree" && claude -p "$retry_prompt" --model "$model" --max-turns "$escalated_turns" --dangerously-skip-permissions --output-format text 2>/dev/null </dev/null)" || retry_exit=$?
-    fi
-
-    # 重新检查
-    has_changes="$(cd "$worktree" && git diff --stat HEAD 2>/dev/null || echo "")"
-    if [[ -z "$has_changes" ]]; then
-      has_changes="$(cd "$worktree" && git status --short 2>/dev/null || echo "")"
-    fi
-
-    if [[ -z "$has_changes" ]]; then
-      ralph_log_warn "Still no changes after escalated retry"
-      ralph_db_update_task_result "$task_id" "No changes made (even after escalated retry)" ""
-      exit_code=1
-    else
-      ralph_log_info "Escalated retry produced changes"
-      result="$retry_result"
-    fi
-  fi
-
-  # 在 worktree 中 stage 所有改动
-  if [[ $exit_code -eq 0 && -n "$has_changes" ]]; then
-    cd "$worktree"
-    git add -A >/dev/null 2>&1
-
-    # 获取任务标题用于 commit message
-    local task_json
-    task_json="$(ralph_db_get_task "$task_id" 2>/dev/null)"
-    local task_title_raw
-    task_title_raw="$(echo "$task_json" | jq -r '.[0].title // "unknown"' 2>/dev/null || echo "$task_id")"
-    [[ -z "$task_title_raw" ]] && task_title_raw="$task_id"
-
-    # 生成变更摘要
-    local diff_summary
-    diff_summary="$(git diff --cached --stat 2>/dev/null | tail -1 | sed 's/^ *//' || echo "")"
-
-    # 判断 commit 类型
-    local commit_type="feat"
-    if echo "$task_title_raw" | grep -qiE '(fix|修复|bug|问题|缺少|丢失|遮挡|异常|错误|失败)'; then
-      commit_type="fix"
-    elif echo "$task_title_raw" | grep -qiE '(refactor|重构|优化)'; then
-      commit_type="refactor"
-    elif echo "$task_title_raw" | grep -qiE '(style|样式|颜色|UI)'; then
-      commit_type="style"
-    fi
-
-    # 从改动文件路径推断 scope
-    local commit_scope=""
-    local changed_files
-    changed_files="$(git diff --cached --name-only 2>/dev/null | grep -v '^\.changeset/' || echo "")"
-    if [[ -n "$changed_files" ]]; then
-      local app_path
-      app_path="$(echo "$changed_files" | grep -oE 'src/app/(\[lang\]/\([^)]+\)/|api/)([^/]+)' | head -1 | sed -E 's|.*/(.*)|\\1|')"
-      if [[ -n "$app_path" ]]; then
-        commit_scope="$app_path"
+      local retry_result retry_exit=0
+      if [[ -n "$final_session" ]]; then
+        retry_result="$(cd "$worktree" && claude --resume "$final_session" -p "$retry_prompt" --model "$model" --max-turns "$escalated_turns" --dangerously-skip-permissions --output-format text 2>/dev/null </dev/null)" || retry_exit=$?
       else
-        local comp_path
-        comp_path="$(echo "$changed_files" | grep -oE 'src/(components|features)/([^/]+)' | head -1 | sed -E 's|.*/(.*)|\1|')"
-        if [[ -n "$comp_path" ]]; then
-          commit_scope="$comp_path"
-        else
-          commit_scope="$(echo "$changed_files" | head -1 | xargs dirname | xargs basename)"
-        fi
+        retry_result="$(cd "$worktree" && claude -p "$retry_prompt" --model "$model" --max-turns "$escalated_turns" --dangerously-skip-permissions --output-format text 2>/dev/null </dev/null)" || retry_exit=$?
+      fi
+
+      # 重新检查
+      commit_count="$(cd "$worktree" && git rev-list --count "$base_ref"..HEAD 2>/dev/null || echo "0")"
+
+      if [[ "$commit_count" -eq 0 ]]; then
+        ralph_log_warn "Still no commits after escalated retry"
+        ralph_db_update_task_result "$task_id" "No changes made (even after escalated retry)" ""
+        exit_code=1
+      else
+        ralph_log_info "Escalated retry produced $commit_count commit(s)"
+        result="$retry_result"
       fi
     fi
-    [[ -z "$commit_scope" ]] && commit_scope="general"
-
-    local commit_msg="$commit_type($commit_scope): $task_title_raw
-
-task-id: $task_id
-$diff_summary"
-
-    # hook 控制
-    if [[ "${RALPH_SKIP_HOOKS:-false}" == "true" ]]; then
-      HUSKY=0 git commit -m "$commit_msg" --no-verify >/dev/null 2>&1 || {
-        ralph_log_warn "Failed to commit in worktree (may have no staged changes)"
-        exit_code=1
-      }
-    else
-      git commit -m "$commit_msg" >/dev/null 2>&1 || {
-        ralph_log_warn "Failed to commit in worktree (may have no staged changes)"
-        exit_code=1
-      }
-    fi
-    cd "$RALPH_CWD"
+  else
+    ralph_log_info "Claude produced $commit_count commit(s)"
   fi
 
   # 消费执行中发现的 discoveries
