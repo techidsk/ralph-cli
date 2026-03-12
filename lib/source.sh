@@ -15,9 +15,6 @@ source "$SCRIPT_DIR/db.sh"
 
 # 加载适配器实现
 case "$RALPH_SOURCE" in
-  gist)
-    source "$SCRIPT_DIR/source-gist.sh"
-    ;;
   repo)
     source "$SCRIPT_DIR/source-repo.sh"
     ;;
@@ -25,7 +22,7 @@ case "$RALPH_SOURCE" in
     source "$SCRIPT_DIR/source-local.sh"
     ;;
   *)
-    ralph_log_error "Unknown RALPH_SOURCE: $RALPH_SOURCE"
+    ralph_log_error "Unknown RALPH_SOURCE: $RALPH_SOURCE (supported: repo, local)"
     exit 1
     ;;
 esac
@@ -56,6 +53,7 @@ ralph_consume_inbox() {
     ralph_log_info "Inbox already consumed (same content hash), skipping"
     return 0
   fi
+  ralph_log_debug "Inbox hash: $inbox_hash (stored: $(cat "$hash_file" 2>/dev/null || echo 'none'))"
 
   # 先清空 inbox，防止竞态丢数据
   clear_inbox
@@ -117,6 +115,7 @@ ralph_consume_inbox() {
     fi
 
     ralph_db_add_task "$id" "$title" "$priority" "$RALPH_DEFAULT_MODEL" "$complexity" "$prompt" "$files" "inbox"
+    ralph_log_debug "Inbox item: $id — $title"
     ralph_log_info "Imported from inbox: $id — $title"
     imported=$((imported + 1))
   done <<< "$content"

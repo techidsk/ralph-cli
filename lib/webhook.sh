@@ -24,6 +24,14 @@ ralph_notify() {
     return 0
   fi
 
+  # 事件过滤
+  if [[ "${RALPH_NOTIFY_EVENTS:-all}" != "all" ]]; then
+    if ! echo ",$RALPH_NOTIFY_EVENTS," | grep -q ",$event,"; then
+      ralph_log_debug "Webhook skipped (event '$event' not in RALPH_NOTIFY_EVENTS)"
+      return 0
+    fi
+  fi
+
   local timestamp
   timestamp="$(date '+%m-%d %H:%M')"
 

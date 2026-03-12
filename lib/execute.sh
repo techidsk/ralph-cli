@@ -39,6 +39,7 @@ ralph_execute() {
     base_ref="$nightly_branch"
     ralph_log_info "Using nightly branch as base: $nightly_branch"
   fi
+  ralph_log_debug "base_ref=$base_ref for $task_id"
 
   # 清理可能残留的同名 worktree/branch
   git worktree remove "$worktree" --force >/dev/null 2>&1 || true
@@ -146,6 +147,8 @@ ${hook_hint}
    {\"description\":\"问题描述\",\"source_task\":\"$task_id\",\"severity\":\"low|medium|high\"}
 "
 
+  ralph_log_debug "Prompt length: ${#enhanced_prompt} chars"
+
   local max_turns="$RALPH_MAX_TURNS_SIMPLE"
   if [[ "$complexity" == "complex" ]]; then
     max_turns="$RALPH_MAX_TURNS_COMPLEX"
@@ -193,6 +196,7 @@ ${hook_hint}
 
   # 保存 session_id 到 DB (无论成功失败，方便 retry 时 resume)
   local final_session="${session_id:-$existing_session}"
+  ralph_log_debug "Claude call: session=$final_session, model=$model, max_turns=$max_turns"
   if [[ -n "$final_session" ]]; then
     ralph_db_update_task_session "$task_id" "$final_session"
   fi
@@ -205,6 +209,7 @@ ${hook_hint}
   # 检查 worktree 是否有新 commit（Claude 自己提交）
   local commit_count
   commit_count="$(cd "$worktree" && git rev-list --count "$base_ref"..HEAD 2>/dev/null || echo "0")"
+  ralph_log_debug "Commit count: $commit_count (base=$base_ref)"
 
   if [[ "$commit_count" -eq 0 ]]; then
     # 检查是否有未提交的改动（Claude 改了代码但忘了 commit）

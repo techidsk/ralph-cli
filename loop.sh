@@ -430,6 +430,7 @@ ralph_run_cycle() {
     # ralph-db 可能返回 JSON 数组或纯文本，统一提取
     local next_id=""
     next_id="$(echo "$raw_result" | jq -r '.[0].id // empty' 2>/dev/null)" || next_id=""
+    ralph_log_debug "Backfill query result: $raw_result"
     if [[ -z "$next_id" ]]; then
       # 纯文本模式：取第一行，去掉空白和 []
       next_id="$(echo "$raw_result" | head -1 | tr -d '[:space:][]')"
@@ -464,6 +465,7 @@ ralph_run_cycle() {
 
     # 轮询检查哪些进程已退出
     local found_done=0
+    ralph_log_debug "Slots: ${#_sw_pids[@]} running, backfill checking..."
     local i=0
     while [[ $i -lt ${#_sw_pids[@]} ]]; do
       local pid="${_sw_pids[$i]}"

@@ -36,6 +36,7 @@ ralph_commit() {
       local nightly_sha head_sha
       nightly_sha="$(git rev-parse "$nightly_branch")"
       head_sha="$(git rev-parse HEAD)"
+      ralph_log_debug "nightly=$nightly_branch, sha=$nightly_sha"
       if [[ "$nightly_sha" != "$head_sha" ]]; then
         ralph_log_info "COMMIT: Fast-forwarding $nightly_branch (${nightly_sha:0:7} → ${head_sha:0:7})"
         git branch -f "$nightly_branch" HEAD
@@ -57,7 +58,7 @@ ralph_commit() {
 
   local patch_count
   patch_count="$(cd "$worktree" && git format-patch -o "$patch_dir" "$base_ref"..HEAD 2>/dev/null | wc -l | tr -d ' ')"
-
+  ralph_log_debug "Patches: $(ls "$patch_dir"/*.patch 2>/dev/null)"
   if [[ "$patch_count" -eq 0 ]]; then
     ralph_log_warn "COMMIT: No patches generated for $task_id (worktree has no commits ahead of HEAD?)"
     ralph_log_warn "COMMIT: worktree HEAD=$(cd "$worktree" && git rev-parse --short HEAD), main HEAD=$(git rev-parse --short HEAD)"

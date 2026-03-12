@@ -95,6 +95,7 @@ PROMPT
     echo ""
     return 1
   }
+  ralph_log_debug "Reflect raw output (first 500 chars): ${result:0:500}"
 
   # 尝试提取 JSON (可能被包在 code block 中)
   local json
@@ -169,6 +170,8 @@ PROMPT
 
   # 消费 discoveries
   ralph_db_consume_discoveries
+
+  ralph_log_debug "Reflect next: $(echo "$json" | jq -c '.next' 2>/dev/null)"
 
   local duration=$(( $(date +%s) - start_time ))
   ralph_log_info "Reflect completed in ${duration}s"

@@ -11,7 +11,7 @@
 - macOS（使用 `caffeinate` 阻止休眠）
 - Python 3（macOS 自带，用于 `ralph-db` 数据层）
 - [Claude Code CLI](https://claude.ai/code)（`claude` 命令可用）
-- [GitHub CLI](https://cli.github.com/)（`gh` 命令可用，使用 Gist 源时需要）
+- [GitHub CLI](https://cli.github.com/)（`gh` 命令，使用 repo 源推送 inbox 时可选）
 - `jq`（macOS 自带）
 
 ## 安装
@@ -196,28 +196,30 @@ ralph-cli/                     # 源码仓库
 
 ## 任务源
 
-支持三种任务源：
+支持两种任务源：
 
 | 源 | 说明 | 适用场景 |
 |----|------|---------|
 | `repo` | Git 仓库（inbox-repo） | 生产环境，飞书 bot 集成 |
-| `gist` | GitHub Gist | 个人使用 |
 | `local` | 本地文件 | 开发调试 |
 
 ## 单 Cycle 流程
 
 ```
 Ralph Runner (本地 Mac)
-┌─────────────────────────┐
-│ 0. CHECK  暂停检测       │
-│ 1. INBOX  消费新任务     │
-│ 2. REFLECT 反思+分诊    │ ← sonnet
-│ 3. EXECUTE worktree ×N  │ ← 并行，按任务选模型
-│ 4. VERIFY 验证命令+review│ ← 从 .ralph.yaml 读取
-│ 5. COMMIT 提交+打标     │ ← nightly 分支
-│ 6. UPDATE 同步状态      │
-└─────────────────────────┘
+┌──────────────────────────────────────────────────────┐
+│ 0. CHECK    暂停检测                                  │
+│ 1. INBOX    消费新任务 (repo/local)                 │
+│ 2. REFLECT  反思+分诊+选任务                    ← sonnet│
+│ 3. EXECUTE  Claude Code 单次 session ×N        ← 并行  │
+│             (改代码 + 验证 + 提交 一站式完成)          │
+│ 4. VERIFY   最终确认 (trust-but-verify)               │
+│ 5. COMMIT   patch → nightly 分支 + checkpoint tag     │
+│ 6. UPDATE   同步状态 + webhook 通知                   │
+└──────────────────────────────────────────────────────┘
 ```
+
+> 详细流程图和架构说明见 [docs/architecture.md](docs/architecture.md)
 
 ## 多项目管理
 
@@ -256,11 +258,13 @@ git revert ralph/cp-0310-002
 |------|------|--------|
 | `RALPH_HOME` | 数据根目录 | `~/.ralph` |
 | `RALPH_PROJECT` | 强制指定项目标识 | （从 `.ralph.yaml` 或 git remote 推导） |
-| `RALPH_SOURCE` | 任务源 `repo`/`gist`/`local` | `repo` |
+| `RALPH_SOURCE` | 任务源 `repo`/`local` | `repo` |
 | `RALPH_CWD` | 项目根目录 | `git rev-parse --show-toplevel` |
 | `RALPH_POLL_INTERVAL` | 无任务时轮询间隔（秒） | `300` |
 | `RALPH_DEFAULT_MODEL` | 默认执行模型 | `claude-sonnet-4-6` |
 | `RALPH_WEBHOOK_URL` | 飞书/钉钉 webhook 地址 | （留空不发送） |
+| `RALPH_NOTIFY_EVENTS` | 通知事件过滤（逗号分隔） | `all` |
+| `RALPH_VERBOSE` | 启用 DEBUG 日志 | `false` |
 
 ## License
 

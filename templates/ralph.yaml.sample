@@ -21,3 +21,4 @@ skip_hooks: true               # HUSKY=0 + --no-verify
 # inbox_repo: git@github.com:user/inbox.git
 # webhook_url: https://...
 # default_model: claude-sonnet-4-6
+# notify_events: task_done,task_failed,needs_human   # 逗号分隔，默认 all

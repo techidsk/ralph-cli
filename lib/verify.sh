@@ -44,12 +44,16 @@ ralph_verify() {
     for cmd in "${verify_cmds[@]}"; do
       [[ -z "$cmd" ]] && continue
       ralph_log_info "Final check: $cmd"
-      if ! (cd "$worktree" && eval "$cmd" >/dev/null 2>&1); then
+      local verify_output
+      verify_output="$(cd "$worktree" && eval "$cmd" 2>&1)" && {
+        ralph_log_debug "Verify cmd output: $(echo "$verify_output" | head -5)"
+        ralph_log_info "Passed: $cmd"
+      } || {
+        ralph_log_debug "Verify cmd output: $(echo "$verify_output" | head -5)"
         ralph_log_error "Final verify failed: $cmd"
         failed=1
         break
-      fi
-      ralph_log_info "Passed: $cmd"
+      }
     done
   else
     ralph_log_info "No verify commands configured, skipping"

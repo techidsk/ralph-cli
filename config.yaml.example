@@ -6,14 +6,11 @@
 
 # ── 任务源 ──
 
-# 任务源类型: repo | gist | local
+# 任务源类型: repo | local
 RALPH_SOURCE: repo
 
 # Git 仓库地址（repo 源）
 # RALPH_INBOX_REPO: git@github.com:your-user/your-inbox.git
-
-# GitHub Gist ID（gist 源）
-# RALPH_GIST_ID:
 
 # ── 项目 ──
 
@@ -44,3 +41,12 @@ RALPH_POLL_INTERVAL: 600
 # Webhook URL（留空则不发送通知）
 # 支持飞书自定义机器人、钉钉、Slack 等任何接收 JSON POST 的地址
 # RALPH_WEBHOOK_URL: https://hooks.example.com/your-webhook
+
+# 通知事件过滤（逗号分隔，默认 all 发送所有事件）
+# 可选事件: task_started, task_done, task_failed, needs_human, service_started, service_stopped, report
+# RALPH_NOTIFY_EVENTS: all
+
+# ── 调试 ──
+
+# 启用 verbose/debug 日志（默认 false）
+# RALPH_VERBOSE: false

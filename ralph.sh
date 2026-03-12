@@ -35,7 +35,7 @@ usage() {
 Ralph Loop — 自动化任务执行系统
 
 用法:
-  ralph start            后台启动主循环
+  ralph start [--verbose] 后台启动主循环
   ralph stop             优雅停止（标记暂停）
   ralph restart          重启（stop + start）
   ralph resume           恢复执行
@@ -126,6 +126,11 @@ YAML
 }
 
 cmd_start() {
+  # --verbose flag
+  if [[ "${1:-}" == "--verbose" ]]; then
+    export RALPH_VERBOSE=true
+  fi
+
   # 双重防重复：PID 文件 + 进程扫描
   if [[ -f "$RALPH_PID_FILE" ]]; then
     local old_pid
@@ -144,12 +149,6 @@ cmd_start() {
   if [[ -n "$stale_pids" ]]; then
     echo "发现遗留 Ralph 进程: $stale_pids"
     echo "请先执行 ralph stop 或手动 kill，再重新启动"
-    return 1
-  fi
-
-  # 验证必要配置
-  if [[ "$RALPH_SOURCE" == "gist" && -z "$RALPH_GIST_ID" ]]; then
-    echo "错误: 使用 Gist 源时需设置 RALPH_GIST_ID 环境变量"
     return 1
   fi
 
@@ -623,7 +622,6 @@ cmd_config() {
   echo "── 任务源 ──"
   echo "  RALPH_SOURCE:       $RALPH_SOURCE"
   echo "  RALPH_INBOX_REPO:   ${RALPH_INBOX_REPO:-（未设置）}"
-  echo "  RALPH_GIST_ID:      ${RALPH_GIST_ID:-（未设置）}"
   echo ""
   echo "── 模型 ──"
   echo "  RALPH_DEFAULT_MODEL:  $RALPH_DEFAULT_MODEL"
@@ -644,7 +642,9 @@ cmd_config() {
   echo "  RALPH_VERIFY_SYMLINK_NODE_MODULES: ${RALPH_VERIFY_SYMLINK_NODE_MODULES}"
   echo ""
   echo "── 通知 ──"
-  echo "  RALPH_WEBHOOK_URL:  ${RALPH_WEBHOOK_URL:+已配置 (${RALPH_WEBHOOK_URL:0:40}...)}${RALPH_WEBHOOK_URL:-（未设置）}"
+  echo "  RALPH_WEBHOOK_URL:     ${RALPH_WEBHOOK_URL:+已配置 (${RALPH_WEBHOOK_URL:0:40}...)}${RALPH_WEBHOOK_URL:-（未设置）}"
+  echo "  RALPH_NOTIFY_EVENTS:   ${RALPH_NOTIFY_EVENTS:-all}"
+  echo "  RALPH_VERBOSE:         ${RALPH_VERBOSE:-false}"
   echo ""
   echo "── 版本 ──"
   local version_file="$RALPH_HOME/.version"
@@ -729,7 +729,7 @@ cmd_clean() {
 # ── 主入口 ──
 
 case "${1:-help}" in
-  start)          cmd_start ;;
+  start)          shift; cmd_start "$@" ;;
   stop)           cmd_stop ;;
   restart)        cmd_restart ;;
   resume)         cmd_resume ;;

@@ -19,6 +19,10 @@ ralph_log() {
 ralph_log_info()  { ralph_log INFO  "$@"; }
 ralph_log_warn()  { ralph_log WARN  "$@"; }
 ralph_log_error() { ralph_log ERROR "$@"; }
+ralph_log_debug() {
+  [[ "${RALPH_VERBOSE:-false}" == "true" ]] || return 0
+  ralph_log DEBUG "$@"
+}
 
 # ── 每日事件日志 (JSONL，按天分割，保留 7 天) ──
 #

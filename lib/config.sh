@@ -66,6 +66,8 @@ _ralph_load_project_yaml() {
           [[ -z "${RALPH_MERGE_TARGET:-}" ]] && RALPH_MERGE_TARGET="$val" ;;
         skip_hooks)
           [[ -z "${RALPH_SKIP_HOOKS:-}" ]] && RALPH_SKIP_HOOKS="$val" ;;
+        notify_events)
+          [[ -z "${RALPH_NOTIFY_EVENTS:-}" ]] && RALPH_NOTIFY_EVENTS="$val" ;;
       esac
       current_section=""
 
@@ -164,7 +166,6 @@ RALPH_DAILY_LOG_DIR="$RALPH_PROJECT_DIR/logs"
 # ── 全局配置 (可被 .ralph.yaml 覆盖) ──
 
 RALPH_SOURCE="${RALPH_SOURCE:-repo}"
-RALPH_GIST_ID="${RALPH_GIST_ID:-}"
 RALPH_INBOX_REPO="${RALPH_INBOX_REPO:-}"
 RALPH_POLL_INTERVAL="${RALPH_POLL_INTERVAL:-300}"
 
@@ -181,6 +182,10 @@ RALPH_LESSONS_MAX=30
 
 # Webhook
 RALPH_WEBHOOK_URL="${RALPH_WEBHOOK_URL:-}"
+RALPH_NOTIFY_EVENTS="${RALPH_NOTIFY_EVENTS:-all}"
+
+# Verbose / Debug
+RALPH_VERBOSE="${RALPH_VERBOSE:-false}"
 
 # 项目特有配置 (从 .ralph.yaml 加载)
 RALPH_MERGE_TARGET="${RALPH_MERGE_TARGET:-main}"
